@@ -1,0 +1,6 @@
+name = "vimeus-streamer"
+main = "worker.js"
+compatibility_date = "2026-10-08"
+
+# Configure PROXY_URL as a Cloudflare Worker variable if Vimeus requires a proxy.
+# Set VIEW_KEY as a secret to override the development default in worker.js.

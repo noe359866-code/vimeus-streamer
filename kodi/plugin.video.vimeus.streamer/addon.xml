@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="plugin.video.vimeus.streamer" name="Vimeus Streamer" version="1.0.0" provider-name="Vimeus">
+  <requires>
+    <import addon="xbmc.python" version="3.0.0" />
+  </requires>
+  <extension point="xbmc.python.pluginsource" library="main.py" provides="video" />
+  <extension point="xbmc.addon.metadata">
+    <summary lang="es_ES">Reproduce enlaces disponibles desde Vimeus Streamer.</summary>
+    <description lang="es_ES">Cliente de Kodi para el backend Vimeus Streamer. Permite buscar por ID de IMDb y reproduce la URL HLS devuelta por el Worker.</description>
+    <platform>all</platform>
+    <license>MIT</license>
+  </extension>
+</addon>

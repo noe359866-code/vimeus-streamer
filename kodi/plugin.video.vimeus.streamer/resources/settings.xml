@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings version="1">
+  <section id="plugin.video.vimeus.streamer">
+    <category id="general" label="Backend">
+      <group id="1">
+        <setting id="worker_url" type="string" label="URL del Worker" default="https://8787-i0si05g4bax993gfy0pho.e2b.app" />
+      </group>
+    </category>
+  </section>
+</settings>
