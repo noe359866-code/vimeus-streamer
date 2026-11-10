@@ -1,50 +1,135 @@
 # Addon de Stremio — VidCore · Chillflix · NekoWatch
 
-Addon de Stremio que **solo entrega streams** (sin catálogos ni metadatos) a partir de tres
-fuentes que publican su propia API de reproductor:
+Addon de Stremio que **solo entrega streams** (sin catálogos) y que reproduce
+**HLS dentro de Stremio** en lugar de abrir un reproductor web.
 
-| Fuente | Identificador | Rutas usadas |
+| Fuente | Identificador | Rutas |
 | --- | --- | --- |
 | [VidCore](https://vidcore.org/movie-embed-api) | TMDB | `/embed/movie/{id}` · `/embed/tv/{id}/{s}/{e}` |
-| [Chillflix](https://www.chillflix.lol/player-api) | TMDB | `/embed/movie/{id}` · `/embed/tv/{id}/{s}/{e}` (host del reproductor: `chillflix.pw`) |
-| [NekoWatch](https://nekowatch.xyz/) | AniList | `/watch/{id}` · `/watch/{id}?ep=N` |
+| [Chillflix](https://www.chillflix.lol/player-api) | TMDB | `/embed/movie/{id}` · `/embed/tv/{id}/{s}/{e}` (reproductor en `chillflix.pw`) |
+| [NekoWatch](https://nekowatch.xyz/) | AniList | `/watch/{id}?ep=N` |
 
-Sin dependencias de npm: solo Node.js 20+ y sus módulos nativos.
+Sin dependencias de npm: Node.js 20+ y módulos nativos.
 
 ---
 
-## Cómo funciona
+## ⚠️ Lee esto antes: cómo se consigue el HLS
 
-Stremio pide `GET /stream/{tipo}/{id}.json`. El addon traduce el id que recibe al que
-necesita cada fuente:
+Las tres fuentes **cifran deliberadamente la resolución del stream**. No hay un
+`.m3u8` en el HTML que se pueda sacar con una expresión regular:
+
+- **VidCore** extrae un token de sesión del HTML, lo *sella* con AES-256-GCM
+  usando constantes que recupera en caliente de su propio bundle de JavaScript,
+  lo envía a endpoints de catálogo opacos y descifra la respuesta.
+- **NekoWatch** reproduce a través de **FlixCloud**, que usa un binario WASM
+  distinto en cada carga de página, con token de un solo uso y material de clave
+  nuevo. Además, el manifiesto llega como Base64 + XOR y algunos segmentos van
+  camuflados con cabecera PNG/WebP.
+- **Chillflix** sirve varios servidores con nombre (Miami, Boise·4K, Atlanta,
+  Seattle) detrás de una API de selección propia.
+
+Esas constantes **rotan**, así que un extractor fijo deja de funcionar solo. Por
+eso este addon **no** incrusta esa criptografía: la delega en un **resolvedor
+externo** que tú eliges y despliegas. Así, cuando una fuente cambie su esquema,
+actualizas el resolvedor y el addon sigue igual.
+
+### Las dos piezas
 
 ```
-tt0944947:2:9   →  Cinemeta  →  TMDB 1399 T2E9   →  VidCore + Chillflix
-tmdb:550        →  (directo) →  TMDB 550         →  VidCore + Chillflix
-kitsu:12345:7   →  relations/Kitsu → AniList ... →  NekoWatch
-tt… (anime)     →  Cinemeta + AniList            →  NekoWatch
+Stremio ──▶ este addon ──▶ resolvedor externo ──▶ .m3u8 del CDN
+                │                                      │
+                └──────────── proxy HLS ───────────────┘
+                     (Referer/Origin, descifrado,
+                      reescritura, desempaquetado)
 ```
 
-- **IMDb → TMDB**: se usa el campo `moviedb_id` de Cinemeta. Si falta y hay `TMDB_API_KEY`,
-  se consulta `/3/find` de TMDB.
-- **Kitsu/MAL/AniDB → AniList**: `relations.yuna.moe`, con respaldo en los *mappings* de
-  Kitsu y en la búsqueda por título de AniList.
-- **IMDb → AniList**: solo si Cinemeta marca el título como animación japonesa
-  (controlado por `NEKOWATCH_IMDB_LOOKUP`).
+1. **El addon** (esto) traduce identificadores, pide el stream, descompone la
+   playlist maestra en calidades y sirve todo por un proxy firmado.
+2. **El resolvedor** (externo) hace el trabajo criptográfico contra cada fuente.
 
-Cada respuesta se cachea en memoria para no repetir las conversiones.
+Sin resolvedor configurado el addon sigue funcionando, pero solo entrega el
+enlace al reproductor web (`externalUrl`).
 
-### Enlace externo frente a enlace directo
+### Configurar el resolvedor
 
-Las tres fuentes sirven **reproductores HTML**, no ficheros de vídeo. Por eso el addon
-devuelve por defecto `externalUrl`: Stremio abre el reproductor web, que es lo que siempre
-funciona.
+```sh
+# Uno para todo
+RESOLVER_URL=https://mi-resolvedor.onrender.com/api/resolve?provider={provider}&type={type}&tmdb={tmdb}&anilist={anilist}&season={season}&episode={episode}
 
-Con `RESOLVE_DIRECT=true` el addon intenta además localizar un `.m3u8`/`.mp4` dentro del
-reproductor para que se vea dentro de Stremio. Es un intento con presupuesto de tiempo
-acotado: si no encuentra nada, el enlace externo sigue ahí. Los enlaces directos que sí se
-resuelvan pasan por `/px/...`, un proxy firmado con HMAC que reenvía `Referer`/`Origin` y
-reescribe las listas HLS (útil en Stremio Web y en TV, que ignoran `proxyHeaders`).
+# O uno distinto por fuente (tiene prioridad sobre el anterior)
+VIDCORE_RESOLVER_URL=https://mi-vidcore.onrender.com/api/resolve?tmdb={tmdb}&type={type}&season={season}&episode={episode}
+NEKOWATCH_RESOLVER_URL=https://mi-anime.onrender.com/watch?anilist={anilist}&ep={episode}
+```
+
+Marcadores disponibles: `{provider}` `{type}` `{tmdb}` `{imdb}` `{anilist}`
+`{season}` `{episode}` `{title}`. Si el resolvedor pide autenticación, usa
+`RESOLVER_TOKEN` (se envía como `Authorization: Bearer …`).
+
+### Formatos de respuesta aceptados
+
+El puente es tolerante a propósito, porque cada proyecto devuelve una forma
+distinta. Todas estas valen:
+
+```jsonc
+{ "url": "https://cdn.../master.m3u8" }
+
+{ "sources": [ { "url": "...", "quality": "1080p", "type": "hls" } ] }
+
+{ "data": { "sources": [ { "file": "..." } ] } }
+
+{ "streams": [ { "url": "...", "headers": { "Referer": "..." } } ] }
+```
+
+Campos opcionales que se aprovechan si vienen:
+
+| Campo | Para qué |
+| --- | --- |
+| `headers` / `referer` | Cabeceras que el CDN exige |
+| `playlist_key` / `key` | Clave Base64 para descifrar manifiestos XOR |
+| `unwrap: "flixcloud-hd2"` | Segmentos camuflados como PNG/WebP |
+| `subtitles` / `tracks` | Subtítulos, que se adjuntan al stream |
+
+Proyectos de código abierto que implementan este tipo de resolución y encajan
+con el contrato: busca en GitHub por `vidcore stream resolver`,
+`ReAnime API` o `flixcloud extractor`. Despliega el que prefieras (también en
+Render) y apunta `RESOLVER_URL` a su endpoint.
+
+---
+
+## Qué hace el proxy HLS
+
+Es la pieza que convierte un `.m3u8` ajeno en algo que Stremio reproduce:
+
+- **Reenvía `Referer`/`Origin`/`User-Agent`** — sin ellos los CDN responden 403.
+- **Reescribe las playlists** para que segmentos, claves `EXT-X-KEY`, mapas
+  `EXT-X-MAP` y pistas `EXT-X-MEDIA` vuelvan a pasar por el proxy.
+- **Descifra manifiestos** en Base64 + XOR cuando hay `playlist_key`.
+- **Desenvuelve segmentos** MPEG-TS camuflados con cabecera PNG/WebP.
+- **Propaga `Range`**, para que el salto en la línea de tiempo funcione.
+- **Firma cada URL con HMAC**: sin firma válida no reenvía nada, así que no se
+  puede usar como proxy abierto.
+
+Además, al abrir la playlist maestra el addon ofrece **una entrada por calidad**
+(1080p, 720p, 480p…) más una entrada *Auto (ABR)*, en lugar de un único enlace.
+
+---
+
+## Traducción de identificadores
+
+Stremio envía IMDb o Kitsu; las fuentes hablan TMDB o AniList:
+
+```
+tt0944947:2:9   →  Cinemeta            →  TMDB 1399 T2E9  →  VidCore + Chillflix
+tmdb:550        →  (directo)           →  TMDB 550        →  VidCore + Chillflix
+kitsu:12345:7   →  relations / Kitsu   →  AniList         →  NekoWatch
+tt… (anime)     →  Cinemeta + AniList  →  AniList         →  NekoWatch
+```
+
+- **IMDb → TMDB**: campo `moviedb_id` de Cinemeta; con `TMDB_API_KEY` se usa
+  `/3/find` de TMDB como respaldo.
+- **Kitsu/MAL/AniDB → AniList**: `relations.yuna.moe`, con respaldo en los
+  *mappings* de Kitsu y en la búsqueda por título de AniList.
+- **IMDb → AniList**: solo si Cinemeta marca el título como animación japonesa.
 
 ---
 
@@ -54,14 +139,12 @@ reescribe las listas HLS (útil en Stremio Web y en TV, que ignoran `proxyHeader
 
 El repositorio incluye [`render.yaml`](../render.yaml) en la raíz.
 
-1. Entra en [dashboard.render.com](https://dashboard.render.com) → **New** → **Blueprint**.
+1. [dashboard.render.com](https://dashboard.render.com) → **New** → **Blueprint**.
 2. Conecta este repositorio y selecciona la rama.
-3. Render lee `render.yaml` y crea el servicio web con `rootDir: stremio`.
-4. **Apply**. Al terminar tendrás `https://<nombre>.onrender.com`.
+3. Render lee `render.yaml` y crea el servicio con `rootDir: stremio`.
+4. **Apply**.
 
 ### Opción B — Servicio web manual
-
-**New** → **Web Service**, conecta el repositorio y usa:
 
 | Campo | Valor |
 | --- | --- |
@@ -71,20 +154,21 @@ El repositorio incluye [`render.yaml`](../render.yaml) en la raíz.
 | Start Command | `npm start` |
 | Health Check Path | `/health` |
 
-> No definas `PORT` a mano: Render lo inyecta y el servidor ya escucha en `0.0.0.0`.
+> No definas `PORT`: Render lo inyecta y el servidor escucha en `0.0.0.0`.
 
 ### Después del primer despliegue
 
-1. Copia la URL del servicio y ponla en `PUBLIC_URL`
-   (p. ej. `https://vimeus-stremio-addon.onrender.com`). Es opcional —si la dejas vacía se
-   deduce de las cabeceras `X-Forwarded-*`— pero fija el valor evita sorpresas.
-2. Abre la raíz del servicio en el navegador y pulsa **Instalar en Stremio**, o pega
+1. Pon la URL del servicio en `PUBLIC_URL`
+   (p. ej. `https://vimeus-stremio-addon.onrender.com`). Es opcional —si falta
+   se deduce de `X-Forwarded-*`— pero fijarla evita sorpresas.
+2. Configura `RESOLVER_URL` si quieres HLS (ver arriba).
+3. Abre la raíz del servicio y pulsa **Instalar en Stremio**, o pega
    `https://<tu-servicio>.onrender.com/manifest.json` en
    **Stremio → Addons → Install via URL**.
 
-> En el plan gratuito Render duerme el servicio tras ~15 min de inactividad; la primera
-> petición puede tardar unos 30 s. Un *cron job* externo que llame a `/health` lo mantiene
-> despierto, o pasa al plan de pago.
+> En el plan gratuito Render duerme el servicio tras ~15 min; la primera
+> petición puede tardar ~30 s. Un cron externo que llame a `/health` lo
+> mantiene despierto.
 
 ---
 
@@ -93,27 +177,30 @@ El repositorio incluye [`render.yaml`](../render.yaml) en la raíz.
 | Variable | Por defecto | Qué hace |
 | --- | --- | --- |
 | `PORT` | `7000` | Lo inyecta Render. |
-| `PUBLIC_URL` | *(auto)* | URL pública. Si falta se deduce de `X-Forwarded-*`. |
-| `PROVIDERS` | `vidcore,chillflix,nekowatch` | Fuentes activas y su orden en la lista. |
-| `RESOLVE_DIRECT` | `false` | Intentar extraer `.m3u8`/`.mp4` del reproductor. |
-| `RESOLVE_TIMEOUT_MS` | `6000` | Presupuesto total de la resolución directa. |
-| `PROXY_ENABLED` | `true` | Habilita `/px/...` para los enlaces directos. |
-| `PROXY_SECRET` | *(aleatorio)* | Clave HMAC del proxy. Fíjala para que las URLs sobrevivan a un reinicio. |
-| `TMDB_API_KEY` | — | Respaldo para IMDb → TMDB cuando Cinemeta no trae el id. |
-| `NEKOWATCH_IMDB_LOOKUP` | `true` | Buscar en AniList desde un id de IMDb si parece anime. |
-| `VIDCORE_BASE` | `https://vidcore.org` | Host de VidCore. |
-| `VIDCORE_TV_PATH` | `tv` | Segmento de series (`tv` o `series`). |
-| `CHILLFLIX_BASE` | `https://www.chillflix.pw` | Host del reproductor de Chillflix. |
-| `CHILLFLIX_PREFER_4K` | `true` | Añade `prefer4k=1`. |
-| `CHILLFLIX_AUTOPLAY` | `true` | Añade `autoplay`. |
-| `CHILLFLIX_AUTONEXT` | `true` | Añade `autonext` en series. |
-| `CHILLFLIX_TITLE` | `false` | Barra de título del reproductor. |
+| `PUBLIC_URL` | *(auto)* | URL pública; si falta se deduce de `X-Forwarded-*`. |
+| `PROVIDERS` | `vidcore,chillflix,nekowatch` | Fuentes activas y su orden. |
+| **`RESOLVER_URL`** | — | **Resolvedor externo. Sin esto no hay HLS.** |
+| `VIDCORE_RESOLVER_URL` | — | Resolvedor solo para VidCore. |
+| `CHILLFLIX_RESOLVER_URL` | — | Resolvedor solo para Chillflix. |
+| `NEKOWATCH_RESOLVER_URL` | — | Resolvedor solo para NekoWatch. |
+| `RESOLVER_TOKEN` | — | Se envía como `Authorization: Bearer …`. |
+| `RESOLVE_DIRECT` | `true` | Entregar HLS. En `false` solo da enlaces web. |
+| `RESOLVE_TIMEOUT_MS` | `9000` | Presupuesto total de resolución. |
+| `EXPAND_QUALITIES` | `true` | Una entrada por calidad desde la maestra. |
+| `INCLUDE_EXTERNAL` | `true` | Mantener el enlace web como alternativa. |
+| `GENERIC_EXTRACTOR` | `true` | Rascar el HTML buscando `.m3u8` (inútil si está cifrado). |
+| `PROXY_ENABLED` | `true` | Proxy HLS. Desactivarlo rompe casi todos los CDN. |
+| `PROXY_SECRET` | *(aleatorio)* | Clave HMAC. Fíjala para que las URLs sobrevivan a un reinicio. |
+| `TMDB_API_KEY` | — | Respaldo para IMDb → TMDB. |
+| `NEKOWATCH_IMDB_LOOKUP` | `true` | Buscar en AniList desde IMDb si parece anime. |
+| `VIDCORE_BASE` / `VIDCORE_TV_PATH` | `https://vidcore.org` / `tv` | Host y segmento de series. |
+| `CHILLFLIX_BASE` | `https://www.chillflix.pw` | Host del reproductor. |
+| `CHILLFLIX_PREFER_4K` / `_AUTOPLAY` / `_AUTONEXT` / `_TITLE` | `true`/`true`/`true`/`false` | Flags del reproductor. |
 | `NEKOWATCH_BASE` | `https://nekowatch.xyz` | Host de NekoWatch. |
-| `ADDON_ID` / `ADDON_NAME` / `ADDON_VERSION` | `com.vimeus.streamer.multisource` / `Vimeus Streamer` / `1.0.0` | Identidad del manifiesto. |
-| `CACHE_TTL_MS` | `21600000` | TTL de la caché de metadatos (6 h). |
-| `STREAM_CACHE_TTL_MS` | `600000` | TTL de la caché de streams (10 min). |
+| `ADDON_ID` / `ADDON_NAME` / `ADDON_VERSION` | ver `config.js` | Identidad del manifiesto. |
+| `CACHE_TTL_MS` / `STREAM_CACHE_TTL_MS` | `21600000` / `600000` | TTL de cachés. |
 | `FETCH_TIMEOUT_MS` | `8000` | Timeout de cada petición saliente. |
-| `LOG_LEVEL` | `info` | `error`, `warn`, `info` o `debug`. |
+| `LOG_LEVEL` | `info` | `error`, `warn`, `info`, `debug`. |
 
 ---
 
@@ -125,7 +212,7 @@ El repositorio incluye [`render.yaml`](../render.yaml) en la raíz.
 | `GET /health` | Healthcheck (lo usa Render). |
 | `GET /manifest.json` | Manifiesto del addon. |
 | `GET /stream/:type/:id.json` | Streams. `type` ∈ `movie`, `series`, `anime`. |
-| `GET /px/:firma/:token` | Proxy de medios firmado. |
+| `GET /px/:firma/:token` | Proxy HLS/MP4 firmado. |
 
 ---
 
@@ -133,30 +220,35 @@ El repositorio incluye [`render.yaml`](../render.yaml) en la raíz.
 
 ```sh
 cd stremio
-npm start                 # http://localhost:7000
-npm test                  # 27 pruebas, sin red
+npm start        # http://localhost:7000
+npm test         # 52 pruebas, sin red
 ```
 
-Pruebas rápidas:
+### Probar el pipeline HLS sin depender de las fuentes reales
+
+Levanta un resolvedor y un CDN de mentira y apunta el addon ahí:
 
 ```sh
-curl localhost:7000/manifest.json
+VIDCORE_RESOLVER_URL="http://127.0.0.1:7999/api/resolve?tmdb={tmdb}" \
+PROVIDERS=vidcore npm start
+
 curl "localhost:7000/stream/movie/tmdb:550.json"
-curl "localhost:7000/stream/series/tmdb:1396:4:5.json"
-curl "localhost:7000/stream/series/anilist:195604:2.json"
 ```
+
+Debe devolver una entrada por calidad, y las URLs `/px/…` deben servir la
+playlist ya reescrita.
 
 ---
 
 ## Limitaciones conocidas
 
-- **Disponibilidad**: el addon construye las URLs documentadas por cada fuente, pero no
-  puede garantizar que un título concreto exista en ellas. Stremio mostrará la entrada y el
-  reproductor dirá si no hay nada.
-- **Temporadas en anime**: AniList trata cada temporada como una entrada distinta. El mapeo
-  desde IMDb es aproximado para temporadas posteriores a la primera; los ids `kitsu:` y
-  `anilist:` son mucho más fiables.
-- **Resolución directa**: depende de cómo cargue cada reproductor sus fuentes y puede dejar
-  de funcionar si cambian su implementación. Por eso está desactivada por defecto.
-- Si una fuente cambia sus rutas, ajusta `VIDCORE_BASE`, `VIDCORE_TV_PATH`,
-  `CHILLFLIX_BASE` o `NEKOWATCH_BASE` sin tocar el código.
+- **Sin resolvedor no hay HLS.** Es la limitación principal y es deliberada:
+  ver la sección de arriba.
+- **Disponibilidad**: el addon construye las URLs documentadas, pero no puede
+  garantizar que un título exista en una fuente concreta.
+- **Temporadas de anime**: AniList trata cada temporada como una entrada
+  distinta. El mapeo desde IMDb es aproximado a partir de la segunda temporada;
+  los ids `kitsu:` y `anilist:` son mucho más fiables.
+- **Plan gratuito de Render**: el proxy retransmite todo el vídeo, así que
+  consume ancho de banda y CPU del servicio. Para uso continuado, considera un
+  plan de pago.

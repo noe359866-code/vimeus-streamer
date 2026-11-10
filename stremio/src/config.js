@@ -86,11 +86,34 @@ export const config = {
   // Opcional. Mejora la conversión IMDb -> TMDB cuando Cinemeta no trae el id.
   tmdbApiKey: (process.env.TMDB_API_KEY || "").trim(),
 
-  // --- Resolución directa -------------------------------------------------
-  // Intenta sacar un .m3u8/.mp4 del reproductor para reproducir dentro de
-  // Stremio. Si falla, siempre queda el enlace externo como alternativa.
-  resolveDirect: bool(process.env.RESOLVE_DIRECT, false),
-  resolveTimeoutMs: int(process.env.RESOLVE_TIMEOUT_MS, 6000, { min: 1000, max: 25000 }),
+  // --- Resolución a HLS ---------------------------------------------------
+  // Entrega enlaces .m3u8/.mp4 reproducibles dentro de Stremio en lugar de
+  // abrir el reproductor web. Activado por defecto.
+  resolveDirect: bool(process.env.RESOLVE_DIRECT, true),
+  resolveTimeoutMs: int(process.env.RESOLVE_TIMEOUT_MS, 9000, { min: 1000, max: 25000 }),
+
+  // Extractor genérico sobre el HTML del reproductor. Barato pero inútil
+  // contra reproductores que cifran la fuente.
+  genericExtractor: bool(process.env.GENERIC_EXTRACTOR, true),
+
+  // Abrir el .m3u8 maestro para ofrecer una entrada por calidad (1080p, 720p…)
+  // en vez de una sola entrada "Auto".
+  expandQualities: bool(process.env.EXPAND_QUALITIES, true),
+
+  // Mantener el enlace al reproductor web como última alternativa.
+  includeExternal: bool(process.env.INCLUDE_EXTERNAL, true),
+
+  // --- Resolvedores externos ----------------------------------------------
+  // Los tres proveedores cifran la resolución del stream. Aquí puedes apuntar
+  // a un servicio que ya la implemente. Admite los marcadores
+  // {provider} {type} {tmdb} {imdb} {anilist} {season} {episode} {title}
+  resolvers: {
+    default: (process.env.RESOLVER_URL || "").trim(),
+    vidcore: (process.env.VIDCORE_RESOLVER_URL || "").trim(),
+    chillflix: (process.env.CHILLFLIX_RESOLVER_URL || "").trim(),
+    nekowatch: (process.env.NEKOWATCH_RESOLVER_URL || "").trim(),
+  },
+  resolverToken: (process.env.RESOLVER_TOKEN || "").trim(),
 
   // --- Proxy HLS ----------------------------------------------------------
   // Reenvía Referer/Origin a los segmentos para clientes que no respetan

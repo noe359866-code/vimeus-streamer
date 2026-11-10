@@ -22,14 +22,35 @@ services:
       - key: PROVIDERS
         value: vidcore,chillflix,nekowatch
 
-      # Intento de extraer un .m3u8/.mp4 para reproducir dentro de Stremio.
-      # Déjalo en false para respuestas instantáneas (solo enlaces externos).
+      # Entregar HLS reproducible dentro de Stremio.
       - key: RESOLVE_DIRECT
-        value: "false"
+        value: "true"
       - key: RESOLVE_TIMEOUT_MS
-        value: "6000"
+        value: "9000"
+      # Una entrada por calidad (1080p, 720p…) desde la playlist maestra.
+      - key: EXPAND_QUALITIES
+        value: "true"
+      # Mantener el reproductor web como alternativa.
+      - key: INCLUDE_EXTERNAL
+        value: "true"
 
-      # Proxy con cabeceras para los enlaces directos que sí se resuelvan.
+      # IMPORTANTE: las tres fuentes cifran la resolución del stream, así que
+      # el HLS sale de un resolvedor externo que tú despliegas. Sin esto el
+      # addon solo entrega enlaces al reproductor web.
+      # Marcadores: {provider} {type} {tmdb} {imdb} {anilist} {season} {episode}
+      - key: RESOLVER_URL
+        sync: false
+      - key: VIDCORE_RESOLVER_URL
+        sync: false
+      - key: CHILLFLIX_RESOLVER_URL
+        sync: false
+      - key: NEKOWATCH_RESOLVER_URL
+        sync: false
+      - key: RESOLVER_TOKEN
+        sync: false
+
+      # Proxy HLS: inyecta Referer/Origin, reescribe playlists y descifra
+      # manifiestos. Desactivarlo rompe la reproducción en casi todos los CDN.
       - key: PROXY_ENABLED
         value: "true"
       - key: PROXY_SECRET
