@@ -16,7 +16,8 @@ import { activeProviders } from "./providers/index.js";
 import { extractMedia } from "./extractors/index.js";
 import { buildProxyUrl } from "./proxy.js";
 import { fetchText, log } from "./http.js";
-import { decryptManifest, parseMasterVariants, qualityLabel, shouldProxyKind } from "./hls.js";
+import { decryptManifest, parseMasterVariants, qualityLabel } from "./hls.js";
+import { decideDelivery } from "./probe.js";
 import { bump } from "./metrics.js";
 import { upstreamSemaphore } from "./limits.js";
 
@@ -28,7 +29,7 @@ function streamName(providerName) {
   return `${config.addonName}\n${providerName}`;
 }
 
-function buildHlsStream({ candidate, media, variant, title, baseUrl }) {
+function buildHlsStream({ candidate, media, variant, title, baseUrl, delivery }) {
   const headers = {
     "User-Agent": config.userAgent,
     Referer: `${candidate.origin}/`,
@@ -39,14 +40,7 @@ function buildHlsStream({ candidate, media, variant, title, baseUrl }) {
   const targetUrl = variant ? variant.uri : media.url;
   const quality = variant ? variant.label : media.quality || "Auto";
 
-  // Un .m3u8 hay que reescribirlo, así que pasa por el proxy salvo en modo
-  // "off". Un .mp4 es el vídeo entero: en modo "playlist" va directo al CDN
-  // para no retransmitir gigabytes a través del servicio.
-  const kind = media.kind === "mp4" ? "segment" : "playlist";
-  const viaProxy =
-    config.proxyEnabled && baseUrl && shouldProxyKind(kind, config.proxyMode);
-
-  const url = viaProxy
+  const url = delivery.viaProxy
     ? buildProxyUrl(baseUrl, {
         url: targetUrl,
         headers,
@@ -56,22 +50,31 @@ function buildHlsStream({ candidate, media, variant, title, baseUrl }) {
     : targetUrl;
 
   const details = [`${media.kind === "mp4" ? "MP4" : "HLS"} · ${quality}`];
-  if (variant?.bandwidth) {
-    details.push(`${Math.round(variant.bandwidth / 1000)} kbps`);
-  }
-  if (media.subtitles?.length) {
-    details.push(`${media.subtitles.length} subtítulo(s)`);
+  if (variant?.bandwidth) details.push(`${Math.round(variant.bandwidth / 1000)} kbps`);
+  if (media.subtitles?.length) details.push(`${media.subtitles.length} subtítulo(s)`);
+  if (!delivery.viaProxy) details.push("directo");
+
+  const behaviorHints = { bingeGroup: `${candidate.bingeGroup}-${quality}` };
+
+  if (delivery.viaProxy) {
+    // Nuestro proxy ya inyecta Referer/Origin, sirve por HTTPS, añade CORS y
+    // pone el Content-Type correcto: el stream ES reproducible en web.
+    //
+    // Marcarlo notWebReady aquí sería un error: Stremio 5 lo desviaría a su
+    // conversor HLS local (/hlsv2) sin necesidad, y proxyHeaders se ignora
+    // igualmente porque el cliente no es quien hace la petición al CDN.
+  } else {
+    // Entrega directa: aquí sí necesitamos que sea el cliente quien ponga las
+    // cabeceras. proxyHeaders SOLO surte efecto con notWebReady: true.
+    behaviorHints.notWebReady = true;
+    behaviorHints.proxyHeaders = { request: headers };
   }
 
   const stream = {
     name: streamName(candidate.providerName),
     title: [title, `▶ ${details.join(" · ")}`].filter(Boolean).join("\n"),
     url,
-    behaviorHints: {
-      notWebReady: true,
-      bingeGroup: `${candidate.bingeGroup}-${quality}`,
-      proxyHeaders: { request: headers },
-    },
+    behaviorHints,
   };
 
   if (media.subtitles?.length) {
@@ -222,28 +225,34 @@ async function resolveStreams(parsed, type, ctx) {
       }),
     );
 
+    const proxyAvailable = config.proxyEnabled && Boolean(ctx.baseUrl);
+
     for (const { candidate, media } of resolved) {
       for (const item of media.slice(0, 4)) {
         const remaining = deadline - Date.now();
+
+        // Una sola decisión por medio: todas sus calidades se entregan igual.
+        const delivery = await decideDelivery(item, { proxyAvailable });
+        log(
+          "debug",
+          `${candidate.provider}: ${delivery.viaProxy ? "por el proxy" : "directo"} ` +
+            `(${delivery.reason})`,
+        );
+
         const variants =
           remaining > 1200 ? await expandVariants(item, candidate, remaining) : [];
+        const base = { candidate, media: item, title, baseUrl: ctx.baseUrl, delivery };
 
         if (variants.length > 1) {
           for (const variant of variants) {
-            streams.push(buildHlsStream({ candidate, media: item, variant, title, baseUrl: ctx.baseUrl }));
+            streams.push(buildHlsStream({ ...base, variant }));
           }
           // Una entrada "Auto" apuntando al maestro, para ABR.
           streams.push(
-            buildHlsStream({
-              candidate,
-              media: { ...item, quality: "Auto (ABR)" },
-              variant: null,
-              title,
-              baseUrl: ctx.baseUrl,
-            }),
+            buildHlsStream({ ...base, media: { ...item, quality: "Auto (ABR)" }, variant: null }),
           );
         } else {
-          streams.push(buildHlsStream({ candidate, media: item, variant: null, title, baseUrl: ctx.baseUrl }));
+          streams.push(buildHlsStream({ ...base, variant: null }));
         }
       }
     }

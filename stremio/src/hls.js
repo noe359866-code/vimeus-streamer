@@ -181,6 +181,7 @@ export function rewritePlaylist(text, baseUrl, toProxy) {
 export function shouldProxyKind(kind, mode) {
   if (mode === "off") return false;
   if (mode === "full") return true;
+  // "playlist" y "auto": todo menos los segmentos, que son el 99,9 % de los bytes.
   return kind !== "segment";
 }
 

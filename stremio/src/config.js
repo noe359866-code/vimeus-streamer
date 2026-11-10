@@ -123,23 +123,32 @@ export const config = {
   /**
    * Cuánto tráfico pasa por el servicio. Es LA decisión de coste:
    *
-   *   full      todo (playlists + claves + segmentos). Máxima compatibilidad,
-   *             pero retransmites cada byte de vídeo: ~2,2 GB por hora y
-   *             espectador en 1080p.
-   *   playlist  solo playlists y claves; los segmentos van directos al CDN.
-   *             Reduce el ancho de banda unas 4.000 veces. Por defecto.
-   *   off       nada; se entrega la URL del CDN con behaviorHints.proxyHeaders.
-   *             Coste cero, pero depende de que el cliente y el CDN cooperen.
+   *   auto      por defecto. Entrega la URL del CDN directamente cuando se
+   *             puede (coste cero) y solo usa el proxy cuando hace falta:
+   *             manifiesto cifrado, segmentos envueltos, o un CDN que exige
+   *             Referer (se comprueba con una sonda y se recuerda por host).
+   *   playlist  siempre proxy, pero solo de playlists y claves; los segmentos
+   *             van directos. ~0,15 MB por reproducción.
+   *   full      todo por el proxy, incluidos los segmentos: ~2,2 GB por hora
+   *             y espectador en 1080p. Para depurar.
+   *   off       nunca proxy. Coste cero, pero si el CDN exige Referer o el
+   *             manifiesto está cifrado, no se reproduce.
    */
-  proxyMode: ["full", "playlist", "off"].includes(
+  proxyMode: ["auto", "full", "playlist", "off"].includes(
     String(process.env.PROXY_MODE || "").trim().toLowerCase(),
   )
     ? String(process.env.PROXY_MODE).trim().toLowerCase()
-    : "playlist",
+    : "auto",
 
   // Caducidad de las URLs firmadas. Sin esto, una URL filtrada sirve para
   // siempre. Debe cubrir la duración de una película.
   proxyUrlTtlMs: int(process.env.PROXY_URL_TTL_MS, 8 * 60 * 60 * 1000, { min: 60_000 }),
+
+  // Sonda que pregunta al CDN si acepta peticiones sin Referer. Solo la usa
+  // el modo auto. El resultado se cachea por host.
+  probeEnabled: bool(process.env.PROBE_ENABLED, true),
+  probeTimeoutMs: int(process.env.PROBE_TIMEOUT_MS, 4000, { min: 500, max: 15000 }),
+  probeTtlMs: int(process.env.PROBE_TTL_MS, 6 * 60 * 60 * 1000, { min: 60_000 }),
 
   proxySecret:
     (process.env.PROXY_SECRET || "").trim() || crypto.randomBytes(24).toString("hex"),

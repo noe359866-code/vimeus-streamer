@@ -176,10 +176,15 @@ export async function handleProxy(req, res, { pathname, baseUrl }) {
 
       bump("proxyPlaylists");
 
-      // Aquí se decide el coste: en modo "playlist" los segmentos salen
+      // Aquí se decide el coste: en modo "playlist"/"auto" los segmentos salen
       // apuntando al CDN y no consumen ancho de banda del servicio.
+      //
+      // Excepción: si hay que desenvolver segmentos camuflados como imagen,
+      // tienen que pasar por aquí sí o sí, porque ningún reproductor lo hace.
+      const effectiveMode = context.unwrap ? "full" : config.proxyMode;
+
       const rewritten = rewritePlaylist(text, context.url, (absolute, kind) => {
-        if (!shouldProxyKind(kind, config.proxyMode)) return absolute;
+        if (!shouldProxyKind(kind, effectiveMode)) return absolute;
         return buildProxyUrl(baseUrl, {
           url: absolute,
           headers: context.headers,

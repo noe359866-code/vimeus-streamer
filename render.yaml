@@ -55,13 +55,16 @@ services:
         value: "true"
 
       # ESTA VARIABLE DECIDE LA FACTURA.
-      #   playlist  solo playlists y claves; los segmentos van directos al CDN.
-      #             ~3,6 GB/mes con 12.000 usuarios y 2 películas cada uno.
-      #   full      retransmite todo el vídeo: ~103 TB en ese mismo escenario,
-      #             unos $15.800/mes a $0,15/GB. Úsalo solo para depurar.
-      #   off       sin proxy; depende de que CDN y cliente cooperen.
+      #   auto      entrega directa (coste cero) cuando el CDN la acepta, y
+      #             proxy solo cuando hace falta. Recomendado.
+      #   playlist  siempre proxy de playlists; segmentos directos. ~3,6 GB/mes
+      #             con 12.000 usuarios y 2 películas cada uno. Úsalo si tus
+      #             usuarios están sobre todo en Stremio Web.
+      #   full      retransmite todo el vídeo: ~103 TB en ese escenario, unos
+      #             $15.800/mes a $0,15/GB. Solo para depurar.
+      #   off       nunca proxy; rompe con manifiestos cifrados y en Web.
       - key: PROXY_MODE
-        value: playlist
+        value: auto
 
       # Obligatorio con más de una instancia: si cada una genera el suyo, las
       # URLs firmadas por una serán rechazadas por las demás.

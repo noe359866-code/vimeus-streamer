@@ -108,18 +108,53 @@ Una película de 2 h en 1080p son unos **4,4 GB**. Con 12.000 usuarios viendo
 | `PROXY_MODE` | Qué atraviesa el servicio | Por película | 12.000 × 2/mes | Excedente en Render |
 | --- | --- | --- | --- | --- |
 | `full` | Playlists + claves + **todos los segmentos** | ~4,4 GB | **~103 TB** | **~$15.800/mes** |
-| `playlist` *(por defecto)* | Solo playlists y claves | ~0,15 MB | **~3,6 GB** | **$0** |
-| `off` | Nada | 0 | 0 | $0 |
+| `playlist` | Solo playlists y claves | ~0,15 MB | ~3,6 GB | **$0** |
+| **`auto`** *(por defecto)* | Nada, o solo playlists si hace falta | 0 – 0,15 MB | 0 – 3,6 GB | **$0** |
+| `off` | Nada | 0 | 0 | **$0** |
 
-El modo `playlist` **reduce el tráfico unas 29.000 veces** y no sacrifica
-compatibilidad: las playlists siguen reescribiéndose y descifrándose, y las
-claves AES siguen pasando por el proxy (son diminutas y casi siempre exigen
-`Referer`). Lo único que cambia es que **los segmentos van directos del CDN al
-reproductor**, que es donde estaban el 99,9 % de los bytes.
+### ¿HLS directo, sin proxy?
 
-> `off` es aún más barato, pero depende de que el CDN acepte al cliente sin
-> `Referer` y de que el cliente respete `behaviorHints.proxyHeaders`. Úsalo solo
-> si lo has comprobado con tus fuentes.
+Sí, y es la vía más barata: Stremio puede inyectar las cabeceras por su cuenta
+con `behaviorHints.proxyHeaders`, de modo que el vídeo va del CDN al
+reproductor sin tocar tu servidor. Otro addon que hizo este cambio pasó de
+50 GB+ a prácticamente cero.
+
+Pero `off` a secas **rompe en silencio** en tres casos:
+
+| Qué | Por qué |
+| --- | --- |
+| **Stremio Web** | El navegador no deja fijar `Referer` (es una cabecera prohibida), así que `proxyHeaders` se ignora. Es una limitación del navegador, no un fallo de Stremio. Las apps de escritorio y Android sí lo respetan. |
+| **Manifiestos cifrados** | Si la fuente devuelve el `.m3u8` en Base64+XOR (el caso de FlixCloud), el reproductor recibe un churro en vez de `#EXTM3U`. Ningún reproductor lo descifra. |
+| **Segmentos camuflados** | Los segmentos con cabecera PNG/WebP necesitan desenvolverse antes de reproducirse. Tampoco lo hace ningún reproductor. |
+
+A eso se suma que muchos CDN no mandan `Access-Control-Allow-Origin`, lo que
+vuelve a dejar fuera a Stremio Web.
+
+### Por eso el modo por defecto es `auto`
+
+En vez de elegir a ciegas entre "gratis pero frágil" y "robusto pero caro",
+`auto` decide **por cada fuente**:
+
+1. ¿El manifiesto va cifrado o los segmentos envueltos? → **proxy obligatorio**,
+   porque sin él no se reproduce.
+2. Si no, **se le pregunta al CDN**: una petición de prueba sin `Referer`.
+   - Responde `200` → **entrega directa**, coste cero.
+   - Responde `403` → proxy solo de playlists.
+
+El resultado de la sonda se guarda **por host** durante 6 h, así que es una
+petición extra la primera vez que aparece un CDN y gratis a partir de ahí.
+
+> Si tus usuarios están sobre todo en Stremio Web, fuerza `PROXY_MODE=playlist`:
+> `auto` optimiza el coste asumiendo un cliente que respeta `proxyHeaders`.
+
+### `notWebReady` según cómo se entregue
+
+Un detalle que rompe la reproducción si se hace mal, y que el addon ya maneja:
+
+| Entrega | `notWebReady` | `proxyHeaders` | Por qué |
+| --- | --- | --- | --- |
+| **Directa** | `true` | sí | `proxyHeaders` **solo surte efecto** con `notWebReady: true`. |
+| **Por el proxy** | *ausente* | no | El proxy ya inyecta las cabeceras, sirve por HTTPS y añade CORS: el stream **es** web-ready. Marcarlo `notWebReady` haría que Stremio 5 lo desviara a su conversor HLS local sin necesidad. |
 
 ### Lo demás que hace falta a ese volumen
 
@@ -253,7 +288,9 @@ El repositorio incluye [`render.yaml`](../render.yaml) en la raíz.
 | `INCLUDE_EXTERNAL` | `true` | Mantener el enlace web como alternativa. |
 | `GENERIC_EXTRACTOR` | `true` | Rascar el HTML buscando `.m3u8` (inútil si está cifrado). |
 | `PROXY_ENABLED` | `true` | Proxy HLS. Desactivarlo rompe casi todos los CDN. |
-| **`PROXY_MODE`** | `playlist` | `full` \| `playlist` \| `off`. **Decide la factura** (ver arriba). |
+| **`PROXY_MODE`** | `auto` | `auto` \| `playlist` \| `full` \| `off`. **Decide la factura** (ver arriba). |
+| `PROBE_ENABLED` | `true` | Sonda que pregunta al CDN si acepta peticiones sin `Referer` (solo en `auto`). |
+| `PROBE_TIMEOUT_MS` / `PROBE_TTL_MS` | `4000` / `21600000` | Timeout de la sonda y cuánto se recuerda por host. |
 | **`PROXY_SECRET`** | *(aleatorio)* | Clave HMAC. **Obligatoria con más de una instancia.** |
 | `PROXY_URL_TTL_MS` | `28800000` | Caducidad de las URLs firmadas (8 h). |
 | `MAX_CONCURRENT_UPSTREAM` | `64` | Tope de peticiones salientes simultáneas. |
