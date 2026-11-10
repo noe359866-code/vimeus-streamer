@@ -1,5 +1,18 @@
 # Vimeus Streamer
 
+Este repositorio contiene dos backends independientes:
+
+| Carpeta | Qué es | Dónde se despliega |
+| --- | --- | --- |
+| raíz (`worker.js`) | Backend de Stremio y Kodi para Vimeus | Cloudflare Workers |
+| [`stremio/`](stremio/) | Addon de Stremio (solo streams) con **VidCore**, **Chillflix** y **NekoWatch** | Render ([`render.yaml`](render.yaml)) |
+
+Consulta [`stremio/README.md`](stremio/README.md) para el addon de Render.
+
+---
+
+## Worker de Cloudflare (Vimeus)
+
 Backend para Stremio y Kodi como Cloudflare Worker. Publica el manifiesto de Stremio y endpoints de streams, consulta Cinemeta de forma opcional, obtiene el embed de Vimeus (directamente o mediante `PROXY_URL`) y extrae el primer enlace HLS encontrado.
 
 ## Endpoints

@@ -1,0 +1,45 @@
+# Blueprint de Render para el addon de Stremio.
+# Render → New → Blueprint → selecciona este repositorio.
+services:
+  - type: web
+    name: vimeus-stremio-addon
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: stremio
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # Render inyecta PORT automáticamente; el servidor escucha en 0.0.0.0.
+      - key: NODE_VERSION
+        value: "20"
+      - key: LOG_LEVEL
+        value: info
+
+      # Proveedores activos y su orden de aparición en Stremio.
+      - key: PROVIDERS
+        value: vidcore,chillflix,nekowatch
+
+      # Intento de extraer un .m3u8/.mp4 para reproducir dentro de Stremio.
+      # Déjalo en false para respuestas instantáneas (solo enlaces externos).
+      - key: RESOLVE_DIRECT
+        value: "false"
+      - key: RESOLVE_TIMEOUT_MS
+        value: "6000"
+
+      # Proxy con cabeceras para los enlaces directos que sí se resuelvan.
+      - key: PROXY_ENABLED
+        value: "true"
+      - key: PROXY_SECRET
+        generateValue: true
+
+      # Opcional: mejora la conversión IMDb -> TMDB. Configúrala en el panel.
+      - key: TMDB_API_KEY
+        sync: false
+
+      # Rellénalo tras el primer deploy con la URL real del servicio
+      # (https://<nombre>.onrender.com). Si lo dejas vacío se deduce sola.
+      - key: PUBLIC_URL
+        sync: false
