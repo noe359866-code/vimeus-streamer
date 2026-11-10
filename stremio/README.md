@@ -135,17 +135,38 @@ vuelve a dejar fuera a Stremio Web.
 En vez de elegir a ciegas entre "gratis pero frágil" y "robusto pero caro",
 `auto` decide **por cada fuente**:
 
-1. ¿El manifiesto va cifrado o los segmentos envueltos? → **proxy obligatorio**,
-   porque sin él no se reproduce.
-2. Si no, **se le pregunta al CDN**: una petición de prueba sin `Referer`.
-   - Responde `200` → **entrega directa**, coste cero.
-   - Responde `403` → proxy solo de playlists.
+La entrega directa exige que se cumpla **todo** esto. Basta que falle una para
+que la fuente pase por el proxy:
 
-El resultado de la sonda se guarda **por host** durante 6 h, así que es una
-petición extra la primera vez que aparece un CDN y gratis a partir de ahí.
+| Comprobación | Si falla | Por qué |
+| --- | --- | --- |
+| El manifiesto no va cifrado y los segmentos no van envueltos | proxy | Sin transformar no se reproduce en ningún cliente. |
+| La URL es `https://` | proxy | Un `http://` lo bloquea el navegador por contenido mixto y lo rechazan algunos clientes. El proxy sirve por HTTPS. |
+| El CDN responde `200` a una petición **sin `Referer`** | proxy | Si responde `403`, solo el proxy puede añadir la cabecera. |
+| El CDN envía `Access-Control-Allow-Origin` | proxy | Sin CORS el navegador no puede ni leer el manifiesto. |
 
-> Si tus usuarios están sobre todo en Stremio Web, fuerza `PROXY_MODE=playlist`:
-> `auto` optimiza el coste asumiendo un cliente que respeta `proxyHeaders`.
+El resultado de la sonda se guarda **por host** durante 6 h: una petición extra
+la primera vez que aparece un CDN y gratis a partir de ahí.
+
+La comprobación de CORS se puede desactivar con `PROBE_REQUIRE_CORS=false`. Solo
+tiene sentido si **ningún** usuario tuyo usa Stremio Web, porque entonces se
+entregan directo también los CDN sin CORS. Ahorra algo de tráfico y rompe el
+navegador.
+
+### Dónde sigue siendo frágil
+
+Dos cosas que `auto` no puede resolver, y conviene saberlas:
+
+- **La sonda mira el host del manifiesto, no el de los segmentos.** Si una fuente
+  sirve el `.m3u8` desde un host abierto y los `.ts` desde otro con `Referer`
+  obligatorio, `auto` entregará directo y la reproducción morirá al arrancar.
+  Si ves ese patrón en una fuente, fuerza `PROXY_MODE=playlist`.
+- **En Stremio Web, `playlist` tampoco basta** si el CDN no manda CORS: el
+  navegador también descarga los segmentos y vuelve a chocar con CORS. Para un
+  CDN así, en Web lo único que funciona es `full`, y `full` cuesta ~$15.800/mes
+  a esta escala. Dicho de otro modo: **una audiencia mayoritariamente de Stremio
+  Web sobre CDN sin CORS no sale a cuenta**; lo sostenible es que la fuente
+  tenga CORS, y ahí `auto` ya entrega directo y gratis.
 
 ### `notWebReady` según cómo se entregue
 
@@ -291,6 +312,7 @@ El repositorio incluye [`render.yaml`](../render.yaml) en la raíz.
 | **`PROXY_MODE`** | `auto` | `auto` \| `playlist` \| `full` \| `off`. **Decide la factura** (ver arriba). |
 | `PROBE_ENABLED` | `true` | Sonda que pregunta al CDN si acepta peticiones sin `Referer` (solo en `auto`). |
 | `PROBE_TIMEOUT_MS` / `PROBE_TTL_MS` | `4000` / `21600000` | Timeout de la sonda y cuánto se recuerda por host. |
+| `PROBE_REQUIRE_CORS` | `true` | Exige CORS para entregar directo. Ponlo en `false` solo si nadie usa Stremio Web. |
 | **`PROXY_SECRET`** | *(aleatorio)* | Clave HMAC. **Obligatoria con más de una instancia.** |
 | `PROXY_URL_TTL_MS` | `28800000` | Caducidad de las URLs firmadas (8 h). |
 | `MAX_CONCURRENT_UPSTREAM` | `64` | Tope de peticiones salientes simultáneas. |

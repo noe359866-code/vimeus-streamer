@@ -27,6 +27,24 @@ export function mustProxy(media) {
   return false;
 }
 
+/**
+ * ¿Es esta URL insegura para entregar a un cliente?
+ *
+ * Un `http://` a pelo lo rechazan algunos clientes de Stremio, y el navegador
+ * lo bloquea por contenido mixto al estar la web servida por HTTPS. Nuestro
+ * proxy sirve por HTTPS, así que en ese caso compensa pasar por él.
+ * Se exceptúa el bucle local, que el navegador trata como contexto seguro.
+ */
+export function isInsecure(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:") return false;
+    return !["localhost", "127.0.0.1", "[::1]", "::1"].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 export function hostOf(url) {
   try {
     return new URL(url).host;
@@ -113,8 +131,24 @@ export async function decideDelivery(media, { proxyAvailable }) {
     };
   }
 
+  // Entregar un http:// a pelo falla en el navegador por contenido mixto.
+  if (isInsecure(media.url)) {
+    return { viaProxy: true, reason: "el CDN no usa HTTPS" };
+  }
+
   const probe = await probeDirect(media.url);
-  return { viaProxy: !probe.direct, reason: probe.reason };
+  if (!probe.direct) {
+    return { viaProxy: true, reason: probe.reason };
+  }
+
+  // El CDN nos deja entrar, pero sin CORS el navegador bloquea la lectura del
+  // manifiesto: en Stremio Web no se reproduciría. Las apps nativas sí podrían,
+  // pero no sabemos desde cuál se pide, así que por defecto vamos a lo seguro.
+  if (config.probeRequireCors && !probe.cors) {
+    return { viaProxy: true, reason: "el CDN no envía CORS" };
+  }
+
+  return { viaProxy: false, reason: probe.reason };
 }
 
 export function probeStats() {

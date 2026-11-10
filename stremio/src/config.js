@@ -149,6 +149,9 @@ export const config = {
   probeEnabled: bool(process.env.PROBE_ENABLED, true),
   probeTimeoutMs: int(process.env.PROBE_TIMEOUT_MS, 4000, { min: 500, max: 15000 }),
   probeTtlMs: int(process.env.PROBE_TTL_MS, 6 * 60 * 60 * 1000, { min: 60_000 }),
+  // Un CDN sin Access-Control-Allow-Origin es injugable en Stremio Web aunque
+  // acepte la petición. Por defecto exigimos CORS para entregar directo.
+  probeRequireCors: bool(process.env.PROBE_REQUIRE_CORS, true),
 
   proxySecret:
     (process.env.PROXY_SECRET || "").trim() || crypto.randomBytes(24).toString("hex"),

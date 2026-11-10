@@ -65,6 +65,10 @@ services:
       #   off       nunca proxy; rompe con manifiestos cifrados y en Web.
       - key: PROXY_MODE
         value: auto
+      # Exige CORS en el CDN para entregar directo. Sin esto, un CDN abierto
+      # pero sin CORS rompería en Stremio Web sin avisar.
+      - key: PROBE_REQUIRE_CORS
+        value: "true"
 
       # Obligatorio con más de una instancia: si cada una genera el suyo, las
       # URLs firmadas por una serán rechazadas por las demás.
