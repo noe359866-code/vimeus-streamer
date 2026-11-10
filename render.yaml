@@ -53,8 +53,34 @@ services:
       # manifiestos. Desactivarlo rompe la reproducción en casi todos los CDN.
       - key: PROXY_ENABLED
         value: "true"
+
+      # ESTA VARIABLE DECIDE LA FACTURA.
+      #   playlist  solo playlists y claves; los segmentos van directos al CDN.
+      #             ~3,6 GB/mes con 12.000 usuarios y 2 películas cada uno.
+      #   full      retransmite todo el vídeo: ~103 TB en ese mismo escenario,
+      #             unos $15.800/mes a $0,15/GB. Úsalo solo para depurar.
+      #   off       sin proxy; depende de que CDN y cliente cooperen.
+      - key: PROXY_MODE
+        value: playlist
+
+      # Obligatorio con más de una instancia: si cada una genera el suyo, las
+      # URLs firmadas por una serán rechazadas por las demás.
       - key: PROXY_SECRET
         generateValue: true
+      - key: PROXY_URL_TTL_MS
+        value: "28800000"
+
+      # Protección frente a picos.
+      - key: MAX_CONCURRENT_UPSTREAM
+        value: "64"
+      - key: BREAKER_THRESHOLD
+        value: "5"
+      - key: BREAKER_RESET_MS
+        value: "30000"
+      - key: RATE_LIMIT_ENABLED
+        value: "true"
+      - key: RATE_LIMIT_MAX
+        value: "120"
 
       # Opcional: mejora la conversión IMDb -> TMDB. Configúrala en el panel.
       - key: TMDB_API_KEY

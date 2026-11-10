@@ -16,6 +16,8 @@ import { getStreams } from "./streams.js";
 import { handleProxy } from "./proxy.js";
 import { log } from "./http.js";
 import { landingPage } from "./landing.js";
+import { snapshot, bump } from "./metrics.js";
+import { breakerStates, clientIp, streamRateLimiter, upstreamSemaphore } from "./limits.js";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -89,12 +91,22 @@ export async function handleRequest(req, res) {
 
     // --- Healthcheck -----------------------------------------------------
     if (pathname === "/health" || pathname === "/healthz") {
+      const memory = process.memoryUsage();
       sendJson(res, {
         ok: true,
         name: config.addonName,
         version: config.addonVersion,
         providers: config.providers,
         resolveDirect: config.resolveDirect,
+        proxyMode: config.proxyMode,
+        resolvers: Object.fromEntries(
+          Object.entries(config.resolvers).map(([key, value]) => [key, Boolean(value)]),
+        ),
+        metrics: snapshot(),
+        breakers: breakerStates(),
+        upstream: { active: upstreamSemaphore.active, pending: upstreamSemaphore.pending },
+        rateLimitTracked: streamRateLimiter.size,
+        memoryMb: Math.round(memory.rss / 1024 / 1024),
         uptime: Math.round(process.uptime()),
       });
       return;
@@ -111,6 +123,14 @@ export async function handleRequest(req, res) {
       /^\/stream\/(movie|series|anime|tv)\/(.+?)\.json$/i,
     );
     if (streamMatch) {
+      if (config.rateLimitEnabled) {
+        const { allowed, retryAfter } = streamRateLimiter.check(clientIp(req));
+        if (!allowed) {
+          bump("rateLimited");
+          sendJson(res, { streams: [] }, 429, { "Retry-After": String(retryAfter) });
+          return;
+        }
+      }
       const type = streamMatch[1].toLowerCase() === "tv" ? "series" : streamMatch[1].toLowerCase();
       const payload = await getStreams(type, streamMatch[2], { baseUrl });
       sendJson(res, payload, 200, { "Cache-Control": "public, max-age=300" });
@@ -129,6 +149,7 @@ export async function handleRequest(req, res) {
 
     sendJson(res, { error: "No encontrado" }, 404);
   } catch (error) {
+    bump("errors");
     log("error", `fallo en ${pathname}:`, error);
     if (!res.headersSent) sendJson(res, { streams: [], error: "Error interno" }, 500);
     else res.end();
@@ -150,6 +171,22 @@ if (isMain) {
     log("info", `${config.addonName} v${config.addonVersion} escuchando en ${config.host}:${config.port}`);
     log("info", `Proveedores activos: ${config.providers.join(", ") || "ninguno"}`);
     log("info", `Resolución directa: ${config.resolveDirect ? "activada" : "desactivada"}`);
+    log("info", `Modo de proxy: ${config.proxyMode}`);
+    if (config.proxyMode === "full") {
+      log(
+        "warn",
+        "PROXY_MODE=full retransmite TODO el vídeo por este servicio " +
+          "(~2,2 GB por hora y espectador en 1080p). Usa 'playlist' si tienes tráfico real.",
+      );
+    }
+    if (config.proxySecretIsEphemeral) {
+      log(
+        "warn",
+        "PROXY_SECRET no está definido: se generó uno aleatorio. Con más de una " +
+          "instancia las URLs firmadas por una serán rechazadas por las demás, y " +
+          "cada reinicio invalida las que ya estén en uso.",
+      );
+    }
     if (config.publicUrl) log("info", `URL pública: ${config.publicUrl}/manifest.json`);
   });
 

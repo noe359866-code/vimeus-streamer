@@ -22,6 +22,8 @@
 import { config } from "./../config.js";
 import { fetchJson, log } from "./../http.js";
 import { streamCache } from "./../cache.js";
+import { breakerFor, upstreamSemaphore } from "./../limits.js";
+import { bump } from "./../metrics.js";
 
 /** Sustituye los marcadores {tmdb}, {season}, … en la plantilla de URL. */
 export function expandTemplate(template, vars) {
@@ -148,23 +150,44 @@ export async function resolveViaBridge(providerId, vars) {
   const cached = streamCache.get(cacheKey);
   if (cached !== undefined) return cached;
 
-  try {
-    const payload = await fetchJson(url, {
-      timeoutMs: config.resolveTimeoutMs,
-      headers: config.resolverToken
-        ? { Authorization: `Bearer ${config.resolverToken}` }
-        : undefined,
-    });
-    const normalized = normalizeResolverPayload(payload);
-    log(
-      normalized.length ? "info" : "debug",
-      `resolvedor ${providerId}: ${normalized.length} fuente(s)`,
-    );
-    streamCache.set(cacheKey, normalized, normalized.length ? config.streamCacheTtlMs : 60_000);
-    return normalized;
-  } catch (error) {
-    log("debug", `resolvedor ${providerId} falló: ${error.message}`);
-    streamCache.set(cacheKey, [], 30_000);
+  // Si el resolvedor lleva un rato cayéndose, no hacemos esperar a cada
+  // usuario el timeout completo: devolvemos vacío al instante y el addon
+  // ofrece el enlace web.
+  const breaker = breakerFor(`resolvedor:${providerId}`);
+  if (!breaker.allow()) {
+    log("debug", `resolvedor ${providerId} en cortocircuito; se omite`);
     return [];
   }
+
+  // wrap() evita que N peticiones simultáneas del mismo título se conviertan
+  // en N llamadas al resolvedor.
+  return streamCache.wrap(
+    cacheKey,
+    async () => {
+      bump("resolverCalls");
+      try {
+        const payload = await upstreamSemaphore.run(() =>
+          fetchJson(url, {
+            timeoutMs: config.resolveTimeoutMs,
+            headers: config.resolverToken
+              ? { Authorization: `Bearer ${config.resolverToken}` }
+              : undefined,
+          }),
+        );
+        const normalized = normalizeResolverPayload(payload);
+        breaker.onSuccess();
+        log(
+          normalized.length ? "info" : "debug",
+          `resolvedor ${providerId}: ${normalized.length} fuente(s)`,
+        );
+        return normalized;
+      } catch (error) {
+        breaker.onFailure();
+        bump("resolverFailures");
+        log("debug", `resolvedor ${providerId} falló: ${error.message}`);
+        return [];
+      }
+    },
+    config.streamCacheTtlMs,
+  );
 }

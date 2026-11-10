@@ -119,8 +119,49 @@ export const config = {
   // Reenvía Referer/Origin a los segmentos para clientes que no respetan
   // behaviorHints.proxyHeaders (Stremio Web, algunas TV).
   proxyEnabled: bool(process.env.PROXY_ENABLED, true),
+
+  /**
+   * Cuánto tráfico pasa por el servicio. Es LA decisión de coste:
+   *
+   *   full      todo (playlists + claves + segmentos). Máxima compatibilidad,
+   *             pero retransmites cada byte de vídeo: ~2,2 GB por hora y
+   *             espectador en 1080p.
+   *   playlist  solo playlists y claves; los segmentos van directos al CDN.
+   *             Reduce el ancho de banda unas 4.000 veces. Por defecto.
+   *   off       nada; se entrega la URL del CDN con behaviorHints.proxyHeaders.
+   *             Coste cero, pero depende de que el cliente y el CDN cooperen.
+   */
+  proxyMode: ["full", "playlist", "off"].includes(
+    String(process.env.PROXY_MODE || "").trim().toLowerCase(),
+  )
+    ? String(process.env.PROXY_MODE).trim().toLowerCase()
+    : "playlist",
+
+  // Caducidad de las URLs firmadas. Sin esto, una URL filtrada sirve para
+  // siempre. Debe cubrir la duración de una película.
+  proxyUrlTtlMs: int(process.env.PROXY_URL_TTL_MS, 8 * 60 * 60 * 1000, { min: 60_000 }),
+
   proxySecret:
     (process.env.PROXY_SECRET || "").trim() || crypto.randomBytes(24).toString("hex"),
+  // Con varias instancias, un secreto distinto por arranque hace que las URLs
+  // firmadas por una instancia las rechace otra.
+  proxySecretIsEphemeral: !(process.env.PROXY_SECRET || "").trim(),
+
+  // --- Límites para escalar -----------------------------------------------
+  // Peticiones salientes simultáneas. Evita agotar sockets y memoria cuando
+  // llega una avalancha.
+  maxConcurrentUpstream: int(process.env.MAX_CONCURRENT_UPSTREAM, 64, { min: 1, max: 1024 }),
+
+  // Cortocircuito del resolvedor: tras N fallos seguidos se deja de llamar
+  // durante un rato, en vez de que cada petición espere el timeout completo.
+  breakerThreshold: int(process.env.BREAKER_THRESHOLD, 5, { min: 1 }),
+  breakerResetMs: int(process.env.BREAKER_RESET_MS, 30_000, { min: 1000 }),
+
+  // Límite por IP sobre /stream (el proxy no se limita: rompería la
+  // reproducción, que hace muchas peticiones legítimas).
+  rateLimitEnabled: bool(process.env.RATE_LIMIT_ENABLED, true),
+  rateLimitWindowMs: int(process.env.RATE_LIMIT_WINDOW_MS, 60_000, { min: 1000 }),
+  rateLimitMax: int(process.env.RATE_LIMIT_MAX, 120, { min: 1 }),
 
   // --- Red / caché --------------------------------------------------------
   fetchTimeoutMs: int(process.env.FETCH_TIMEOUT_MS, 8000, { min: 1000, max: 30000 }),

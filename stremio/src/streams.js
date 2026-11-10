@@ -16,7 +16,9 @@ import { activeProviders } from "./providers/index.js";
 import { extractMedia } from "./extractors/index.js";
 import { buildProxyUrl } from "./proxy.js";
 import { fetchText, log } from "./http.js";
-import { decryptManifest, parseMasterVariants, qualityLabel } from "./hls.js";
+import { decryptManifest, parseMasterVariants, qualityLabel, shouldProxyKind } from "./hls.js";
+import { bump } from "./metrics.js";
+import { upstreamSemaphore } from "./limits.js";
 
 /* ------------------------------------------------------------------ */
 /* Construcción de entradas para Stremio                               */
@@ -37,18 +39,21 @@ function buildHlsStream({ candidate, media, variant, title, baseUrl }) {
   const targetUrl = variant ? variant.uri : media.url;
   const quality = variant ? variant.label : media.quality || "Auto";
 
-  // Sin proxy el CDN suele devolver 403 por falta de Referer, así que es la
-  // ruta por defecto. proxyHeaders queda como respaldo para clientes que lo
-  // respetan y prefieren ir directos.
-  const url =
-    config.proxyEnabled && baseUrl
-      ? buildProxyUrl(baseUrl, {
-          url: targetUrl,
-          headers,
-          key: media.playlistKey || "",
-          unwrap: media.unwrap === "flixcloud-hd2" ? "image" : media.unwrap || "",
-        })
-      : targetUrl;
+  // Un .m3u8 hay que reescribirlo, así que pasa por el proxy salvo en modo
+  // "off". Un .mp4 es el vídeo entero: en modo "playlist" va directo al CDN
+  // para no retransmitir gigabytes a través del servicio.
+  const kind = media.kind === "mp4" ? "segment" : "playlist";
+  const viaProxy =
+    config.proxyEnabled && baseUrl && shouldProxyKind(kind, config.proxyMode);
+
+  const url = viaProxy
+    ? buildProxyUrl(baseUrl, {
+        url: targetUrl,
+        headers,
+        key: media.playlistKey || "",
+        unwrap: media.unwrap === "flixcloud-hd2" ? "image" : media.unwrap || "",
+      })
+    : targetUrl;
 
   const details = [`${media.kind === "mp4" ? "MP4" : "HLS"} · ${quality}`];
   if (variant?.bandwidth) {
@@ -104,15 +109,17 @@ async function expandVariants(media, candidate, timeoutMs) {
   if (media.kind !== "hls" || !config.expandQualities) return [];
 
   try {
-    const raw = await fetchText(media.url, {
-      timeoutMs,
-      maxBytes: 2 * 1024 * 1024,
-      headers: {
-        Referer: `${candidate.origin}/`,
-        Origin: candidate.origin,
-        ...media.headers,
-      },
-    });
+    const raw = await upstreamSemaphore.run(() =>
+      fetchText(media.url, {
+        timeoutMs,
+        maxBytes: 2 * 1024 * 1024,
+        headers: {
+          Referer: `${candidate.origin}/`,
+          Origin: candidate.origin,
+          ...media.headers,
+        },
+      }),
+    );
     const { text } = decryptManifest(raw, media.playlistKey || "");
     const variants = parseMasterVariants(text, media.url);
     if (variants.length > 1) {
@@ -145,9 +152,20 @@ export async function getStreams(type, rawId, ctx = {}) {
     ctx.baseUrl || "",
   ].join(":");
 
-  const cached = streamCache.get(cacheKey);
-  if (cached) return cached;
+  bump("streamRequests");
+  if (streamCache.get(cacheKey) !== undefined) {
+    bump("streamCacheHits");
+    return streamCache.get(cacheKey);
+  }
+  bump("streamCacheMisses");
 
+  // wrap() agrupa las peticiones idénticas que llegan a la vez: si 500
+  // usuarios abren el mismo estreno en el mismo segundo, el resolvedor
+  // recibe UNA llamada, no 500.
+  return streamCache.wrap(cacheKey, () => resolveStreams(parsed, type, ctx));
+}
+
+async function resolveStreams(parsed, type, ctx) {
   const providers = activeProviders();
   const title = await resolveDisplayTitle(parsed).catch(() => null);
 
@@ -166,7 +184,6 @@ export async function getStreams(type, rawId, ctx = {}) {
   if (!candidates.length) {
     log("info", `sin fuentes para ${type}/${parsed.raw}`);
     const empty = { streams: [] };
-    streamCache.set(cacheKey, empty, 60_000);
     return empty;
   }
 
@@ -239,7 +256,6 @@ export async function getStreams(type, rawId, ctx = {}) {
   }
 
   const payload = { streams };
-  streamCache.set(cacheKey, payload);
   log(
     "info",
     `${streams.length} stream(s) para ${type}/${parsed.raw} ` +

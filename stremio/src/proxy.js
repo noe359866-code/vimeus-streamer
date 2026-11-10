@@ -23,8 +23,11 @@ import {
   isPlaylistText,
   looksLikeImageSegment,
   rewritePlaylist,
+  shouldProxyKind,
   unwrapImageSegment,
 } from "./hls.js";
+import { bump } from "./metrics.js";
+import { upstreamSemaphore } from "./limits.js";
 
 const MAX_MANIFEST_BYTES = 8 * 1024 * 1024;
 
@@ -46,10 +49,11 @@ export function sign(payload) {
  *   u = URL destino, h = cabeceras, k = clave XOR del manifiesto,
  *   w = modo de desempaquetado de segmentos
  */
-export function encodeContext({ url, headers = {}, key = "", unwrap = "" }) {
-  return Buffer.from(JSON.stringify({ u: url, h: headers, k: key, w: unwrap }), "utf8").toString(
-    "base64url",
-  );
+export function encodeContext({ url, headers = {}, key = "", unwrap = "", expiresAt = 0 }) {
+  return Buffer.from(
+    JSON.stringify({ u: url, h: headers, k: key, w: unwrap, e: expiresAt || 0 }),
+    "utf8",
+  ).toString("base64url");
 }
 
 export function decodeContext(token) {
@@ -61,15 +65,24 @@ export function decodeContext(token) {
       headers: parsed.h && typeof parsed.h === "object" ? parsed.h : {},
       key: typeof parsed.k === "string" ? parsed.k : "",
       unwrap: typeof parsed.w === "string" ? parsed.w : "",
+      expiresAt: Number.isFinite(parsed.e) ? parsed.e : 0,
     };
   } catch {
     return null;
   }
 }
 
-/** URL pública y firmada del proxy para un recurso concreto. */
+/**
+ * URL pública y firmada del proxy.
+ *
+ * Lleva caducidad: una URL filtrada no debe servir indefinidamente como
+ * relay hacia ese destino.
+ */
 export function buildProxyUrl(baseUrl, context) {
-  const token = encodeContext(context);
+  const token = encodeContext({
+    ...context,
+    expiresAt: context.expiresAt ?? Date.now() + config.proxyUrlTtlMs,
+  });
   return `${baseUrl}/px/${sign(token)}/${token}`;
 }
 
@@ -108,8 +121,11 @@ export async function handleProxy(req, res, { pathname, baseUrl }) {
     return true;
   }
 
+  bump("proxyRequests");
+
   const [, signature, token] = match;
   if (!timingSafeEqual(sign(token), signature)) {
+    bump("proxyRejected");
     res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("Firma no válida");
     return true;
@@ -117,22 +133,32 @@ export async function handleProxy(req, res, { pathname, baseUrl }) {
 
   const context = decodeContext(token);
   if (!context) {
+    bump("proxyRejected");
     res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("Token no válido");
+    return true;
+  }
+
+  if (context.expiresAt && Date.now() > context.expiresAt) {
+    bump("proxyRejected");
+    res.writeHead(410, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Enlace caducado; vuelve a abrir el título en Stremio");
     return true;
   }
 
   const wantsImageUnwrap = context.unwrap === "image";
 
   try {
-    const upstream = await fetchWithTimeout(context.url, {
-      headers: {
-        ...context.headers,
-        // Con desempaquetado de imagen necesitamos el objeto entero.
-        ...(req.headers.range && !wantsImageUnwrap ? { Range: req.headers.range } : {}),
-      },
-      timeoutMs: config.fetchTimeoutMs,
-    });
+    const upstream = await upstreamSemaphore.run(() =>
+      fetchWithTimeout(context.url, {
+        headers: {
+          ...context.headers,
+          // Con desempaquetado de imagen necesitamos el objeto entero.
+          ...(req.headers.range && !wantsImageUnwrap ? { Range: req.headers.range } : {}),
+        },
+        timeoutMs: config.fetchTimeoutMs,
+      }),
+    );
 
     const contentType = upstream.headers.get("content-type") || "";
 
@@ -148,16 +174,23 @@ export async function handleProxy(req, res, { pathname, baseUrl }) {
         return true;
       }
 
-      const rewritten = rewritePlaylist(text, context.url, (absolute) =>
-        buildProxyUrl(baseUrl, {
+      bump("proxyPlaylists");
+
+      // Aquí se decide el coste: en modo "playlist" los segmentos salen
+      // apuntando al CDN y no consumen ancho de banda del servicio.
+      const rewritten = rewritePlaylist(text, context.url, (absolute, kind) => {
+        if (!shouldProxyKind(kind, config.proxyMode)) return absolute;
+        return buildProxyUrl(baseUrl, {
           url: absolute,
           headers: context.headers,
           key: context.key,
           unwrap: context.unwrap,
-        }),
-      );
+          expiresAt: context.expiresAt,
+        });
+      });
 
       const body = Buffer.from(rewritten, "utf8");
+      bump("proxyBytes", body.length);
       res.writeHead(upstream.status === 206 ? 200 : upstream.status, {
         ...corsHeaders(),
         "Content-Type": "application/vnd.apple.mpegurl",
@@ -170,9 +203,11 @@ export async function handleProxy(req, res, { pathname, baseUrl }) {
 
     /* --- Segmentos camuflados como imagen --- */
     if (wantsImageUnwrap && looksLikeImageSegment(context.url, contentType)) {
+      bump("proxySegments");
       const wrapped = Buffer.from(await upstream.arrayBuffer());
       const unwrapped = unwrapImageSegment(wrapped, IMAGE_XOR_KEY);
       const body = unwrapped || wrapped;
+      bump("proxyBytes", body.length);
       res.writeHead(200, {
         ...corsHeaders(),
         "Content-Type": unwrapped ? "video/mp2t" : contentType || "application/octet-stream",
@@ -194,6 +229,7 @@ export async function handleProxy(req, res, { pathname, baseUrl }) {
       return true;
     }
 
+    bump("proxySegments");
     await pumpBody(upstream.body, req, res);
     res.end();
     return true;
@@ -241,6 +277,7 @@ async function pumpBody(body, req, res) {
   while (true) {
     const { done, value } = await reader.read();
     if (done || cancelled) break;
+    bump("proxyBytes", value.byteLength);
     if (!res.write(Buffer.from(value))) {
       await new Promise((resolve) => res.once("drain", resolve));
     }

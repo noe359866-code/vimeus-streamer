@@ -108,12 +108,38 @@ export function absolutize(uri, baseUrl) {
 /* ------------------------------------------------------------------ */
 
 /**
- * Reescribe una playlist para que todo (segmentos, claves AES, mapas de
- * inicialización y pistas alternativas) pase por el proxy.
+ * Clasifica una URL dentro de una playlist. Permite decidir qué pasa por el
+ * proxy y qué va directo al CDN, que es de donde sale todo el ahorro de
+ * ancho de banda: los segmentos son el 99,9 % de los bytes.
  *
- * @param {string} text        contenido de la playlist
- * @param {string} baseUrl     URL real de la playlist, para resolver relativos
- * @param {(absoluteUrl:string)=>string} toProxy  constructor de URL de proxy
+ * @returns {"playlist"|"key"|"map"|"segment"}
+ */
+export function classifyUri(uri, tag = "") {
+  const upperTag = tag.toUpperCase();
+  if (upperTag.includes("EXT-X-KEY") || upperTag.includes("EXT-X-SESSION-KEY")) return "key";
+  if (upperTag.includes("EXT-X-MAP")) return "map";
+
+  let pathname = uri;
+  try {
+    pathname = new URL(uri, "http://x.invalid").pathname;
+  } catch {
+    // Si no parsea nos quedamos con la cadena tal cual.
+  }
+  if (/\.m3u8$/i.test(pathname)) return "playlist";
+  if (upperTag.includes("EXT-X-MEDIA") || upperTag.includes("I-FRAME-STREAM-INF")) {
+    return "playlist";
+  }
+  return "segment";
+}
+
+/**
+ * Reescribe una playlist.
+ *
+ * @param {string} text     contenido de la playlist
+ * @param {string} baseUrl  URL real de la playlist, para resolver relativos
+ * @param {(absoluteUrl:string, kind:string)=>string} toProxy
+ *        Devuelve la URL que debe quedar escrita. Si devuelve la propia URL
+ *        recibida, ese recurso irá directo al CDN.
  */
 export function rewritePlaylist(text, baseUrl, toProxy) {
   return text
@@ -125,6 +151,7 @@ export function rewritePlaylist(text, baseUrl, toProxy) {
       if (trimmed.startsWith("#")) {
         // #EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA y #EXT-X-I-FRAME-STREAM-INF
         // llevan la URL en un atributo URI="...".
+        const tag = trimmed.split(":")[0];
         return line.replace(
           /\b(URI)=("([^"]*)"|'([^']*)')/gi,
           (full, name, quoted, dq, sq) => {
@@ -132,15 +159,29 @@ export function rewritePlaylist(text, baseUrl, toProxy) {
             const absolute = absolutize(value, baseUrl);
             if (!absolute) return full;
             const quote = quoted[0];
-            return `${name}=${quote}${toProxy(absolute)}${quote}`;
+            return `${name}=${quote}${toProxy(absolute, classifyUri(absolute, tag))}${quote}`;
           },
         );
       }
 
       const absolute = absolutize(trimmed, baseUrl);
-      return absolute ? toProxy(absolute) : line;
+      return absolute ? toProxy(absolute, classifyUri(absolute)) : line;
     })
     .join("\n");
+}
+
+/**
+ * ¿Debe pasar este recurso por el proxy, según el modo configurado?
+ *
+ *   full      todo
+ *   playlist  playlists, claves y mapas de inicialización (pequeños y casi
+ *             siempre exigen Referer); los segmentos van directos
+ *   off       nada
+ */
+export function shouldProxyKind(kind, mode) {
+  if (mode === "off") return false;
+  if (mode === "full") return true;
+  return kind !== "segment";
 }
 
 /* ------------------------------------------------------------------ */

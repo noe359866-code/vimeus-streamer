@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { buildProxyUrl, decodeContext, encodeContext, sign } from "../src/proxy.js";
+import { config } from "../src/config.js";
 import { TtlCache } from "../src/cache.js";
 
 test("el contexto del proxy sobrevive al ida y vuelta", () => {
@@ -10,9 +11,34 @@ test("el contexto del proxy sobrevive al ida y vuelta", () => {
     headers: { Referer: "https://vidcore.org/", Origin: "https://vidcore.org" },
     key: "YWJjZA==",
     unwrap: "image",
+    expiresAt: 1800000000000,
   };
   const decoded = decodeContext(encodeContext(context));
   assert.deepEqual(decoded, context);
+});
+
+test("las URLs del proxy llevan caducidad", () => {
+  const before = Date.now();
+  const url = buildProxyUrl("https://addon.test", { url: "https://cdn.test/a.m3u8" });
+  const context = decodeContext(url.split("/").pop());
+  assert.ok(context.expiresAt > before, "debe caducar en el futuro");
+  assert.ok(context.expiresAt <= before + config.proxyUrlTtlMs + 1000);
+});
+
+test("la caducidad se puede fijar y va firmada", () => {
+  const expiresAt = Date.now() + 60_000;
+  const url = buildProxyUrl("https://addon.test", {
+    url: "https://cdn.test/a.m3u8",
+    expiresAt,
+  });
+  const [, signature, token] = url.match(/\/px\/([a-f0-9]{32})\/(.+)$/);
+  assert.equal(decodeContext(token).expiresAt, expiresAt);
+  // Manipular la caducidad invalida la firma.
+  const tampered = encodeContext({
+    url: "https://cdn.test/a.m3u8",
+    expiresAt: expiresAt + 10_000_000,
+  });
+  assert.notEqual(sign(tampered), signature);
 });
 
 test("decodeContext rechaza tokens corruptos", () => {

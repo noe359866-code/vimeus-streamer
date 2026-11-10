@@ -96,6 +96,69 @@ Render) y apunta `RESOLVER_URL` a su endpoint.
 
 ---
 
+## Escalar a +12.000 usuarios: el ancho de banda es el problema
+
+Si el servicio retransmite el vídeo, **la factura te arruina antes que la CPU**.
+En abril de 2026 Render recortó el ancho de banda incluido de 100 GB a **5 GB**
+(Hobby) y de 500 GB a **25 GB** (Pro), con excedente a **$0,15/GB**.
+
+Una película de 2 h en 1080p son unos **4,4 GB**. Con 12.000 usuarios viendo
+2 películas al mes:
+
+| `PROXY_MODE` | Qué atraviesa el servicio | Por película | 12.000 × 2/mes | Excedente en Render |
+| --- | --- | --- | --- | --- |
+| `full` | Playlists + claves + **todos los segmentos** | ~4,4 GB | **~103 TB** | **~$15.800/mes** |
+| `playlist` *(por defecto)* | Solo playlists y claves | ~0,15 MB | **~3,6 GB** | **$0** |
+| `off` | Nada | 0 | 0 | $0 |
+
+El modo `playlist` **reduce el tráfico unas 29.000 veces** y no sacrifica
+compatibilidad: las playlists siguen reescribiéndose y descifrándose, y las
+claves AES siguen pasando por el proxy (son diminutas y casi siempre exigen
+`Referer`). Lo único que cambia es que **los segmentos van directos del CDN al
+reproductor**, que es donde estaban el 99,9 % de los bytes.
+
+> `off` es aún más barato, pero depende de que el CDN acepte al cliente sin
+> `Referer` y de que el cliente respete `behaviorHints.proxyHeaders`. Úsalo solo
+> si lo has comprobado con tus fuentes.
+
+### Lo demás que hace falta a ese volumen
+
+El servicio ya incluye las piezas que evitan que un pico se convierta en una caída:
+
+| Pieza | Qué evita |
+| --- | --- |
+| **Agrupación de peticiones** | Si 500 usuarios abren el mismo estreno a la vez, el resolvedor recibe **1** llamada, no 500. |
+| **Cortocircuito** | Si el resolvedor se cae, se deja de llamar durante `BREAKER_RESET_MS` en vez de que cada usuario espere 9 s. |
+| **Semáforo de salida** | Tope de peticiones salientes simultáneas (`MAX_CONCURRENT_UPSTREAM`); sin él, un pico agota sockets y memoria. |
+| **Límite por IP** | 120 peticiones/min por IP sobre `/stream`. El proxy **no** se limita: la reproducción hace muchas peticiones legítimas. |
+| **URLs con caducidad** | Una URL de proxy filtrada deja de servir como relay pasadas 8 h (`PROXY_URL_TTL_MS`). |
+| **Métricas en `/health`** | Aciertos de caché, bytes retransmitidos, fallos del resolvedor, estado de los cortocircuitos. |
+
+### ⚠️ `PROXY_SECRET` es obligatorio con más de una instancia
+
+Si no lo defines, cada instancia genera uno aleatorio al arrancar. Con
+autoescalado, una URL firmada por la instancia A la **rechaza** la B, y cada
+despliegue invalida las que estén en uso. El `render.yaml` lo genera con
+`generateValue: true` (estable); si configuras el servicio a mano, fíjalo tú.
+El servidor avisa por log al arrancar si falta.
+
+### Dimensionar el servicio
+
+En modo `playlist` el servicio solo sirve JSON y playlists de pocos KB:
+
+- **Instancia**: Starter ($7) basta para empezar; Standard ($25, 1 vCPU / 2 GB)
+  si quieres margen. El trabajo pesado lo hace el resolvedor, no esto.
+- **Plan**: Pro ($25/mes) si necesitas **autoescalado horizontal** — en Hobby no
+  está disponible.
+- **Caché entre instancias**: cada instancia tiene su caché en memoria, así que
+  con N instancias el acierto baja. Con la agrupación de peticiones y un TTL de
+  6 h en los mapeos de identificadores aguanta bien hasta unas pocas instancias.
+  Más allá, conviene una caché compartida (Render Key Value o Upstash).
+- **El cuello de botella real es el resolvedor**, no este addon. Dimensiónalo a
+  él y vigila `resolverFailures` y `breakers` en `/health`.
+
+---
+
 ## Qué hace el proxy HLS
 
 Es la pieza que convierte un `.m3u8` ajeno en algo que Stremio reproduce:
@@ -190,7 +253,14 @@ El repositorio incluye [`render.yaml`](../render.yaml) en la raíz.
 | `INCLUDE_EXTERNAL` | `true` | Mantener el enlace web como alternativa. |
 | `GENERIC_EXTRACTOR` | `true` | Rascar el HTML buscando `.m3u8` (inútil si está cifrado). |
 | `PROXY_ENABLED` | `true` | Proxy HLS. Desactivarlo rompe casi todos los CDN. |
-| `PROXY_SECRET` | *(aleatorio)* | Clave HMAC. Fíjala para que las URLs sobrevivan a un reinicio. |
+| **`PROXY_MODE`** | `playlist` | `full` \| `playlist` \| `off`. **Decide la factura** (ver arriba). |
+| **`PROXY_SECRET`** | *(aleatorio)* | Clave HMAC. **Obligatoria con más de una instancia.** |
+| `PROXY_URL_TTL_MS` | `28800000` | Caducidad de las URLs firmadas (8 h). |
+| `MAX_CONCURRENT_UPSTREAM` | `64` | Tope de peticiones salientes simultáneas. |
+| `BREAKER_THRESHOLD` | `5` | Fallos seguidos antes de cortocircuitar el resolvedor. |
+| `BREAKER_RESET_MS` | `30000` | Pausa del cortocircuito. |
+| `RATE_LIMIT_ENABLED` | `true` | Límite por IP sobre `/stream`. |
+| `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX` | `60000` / `120` | Ventana y máximo por IP. |
 | `TMDB_API_KEY` | — | Respaldo para IMDb → TMDB. |
 | `NEKOWATCH_IMDB_LOOKUP` | `true` | Buscar en AniList desde IMDb si parece anime. |
 | `VIDCORE_BASE` / `VIDCORE_TV_PATH` | `https://vidcore.org` / `tv` | Host y segmento de series. |
